@@ -4,6 +4,7 @@ Bài toán **tìm kiếm ảnh mặt người cao tuổi** (Content-Based Image 
 Đầu vào: 1 ảnh query (jpg/png) → Đầu ra: **Top-3 ảnh giống nhất** trong tập dữ liệu.  
 
 ---
+
 ## 📌 Pipeline hiện tại
 
 1. **Tiền xử lý (Preprocess)**
@@ -27,7 +28,8 @@ Bài toán **tìm kiếm ảnh mặt người cao tuổi** (Content-Based Image 
 
 ---
 
-## 📂 Cấu trúc thư mục
+## Cấu trúc thư mục
+```bash
 elderly-face-retrieval/
 │
 ├─ data/
@@ -48,10 +50,10 @@ elderly-face-retrieval/
 ├─ requirements.txt
 └─ README.md
 
-
+```
 ---
 
-## ⚙️ Cài đặt môi trường
+## Cài đặt môi trường
 
 ```bash
 # clone repo
@@ -65,3 +67,30 @@ python -m venv .venv
 
 # cài dependencies
 pip install -r requirements.txt
+
+```
+## Chạy thử
+1. **Tiền xử lý + lọc ảnh**
+```bash
+python src/preprocess.py
+python src/clean_check.py
+```
+2. **Trích rút đặc trưng**
+```bash
+# Facenet (deep features)
+python src/extract_features.py --method facenet --device cpu
+
+# LBP (truyền thống)
+python src/extract_features.py --method lbp
+```
+3. **Truy vấn Top-3 ảnh giống nhất**
+```bash
+python src/query.py --image "data/aligned_clean/<your_image>.jpg" --method facenet --device cpu --save-grid
+```
+Kết quả:
+ - In ra Top-3 ảnh giống nhất + độ tương đồng (cosine).
+ - Nếu có --save-grid thì lưu ảnh minh hoạ vào thư mục report/.
+
+---
+## License
+Chỉ sử dụng cho mục đích học thuật / demo nội bộ.
