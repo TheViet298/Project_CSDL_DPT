@@ -57,7 +57,7 @@ elderly-face-retrieval/
 
 ```bash
 # clone repo
-git clone https://github.com/<your-username>/elderly-face-retrieval.git
+git clone https://github.com/TheViet298/Project_CSDL_DPT
 cd elderly-face-retrieval
 
 # tạo venv
