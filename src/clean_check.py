@@ -1,4 +1,4 @@
-# src/clean_check.py
+# src/clean_check.py - 748 img
 import os, csv, hashlib
 from pathlib import Path
 from PIL import Image, ImageStat
@@ -13,8 +13,8 @@ MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET_SIZE = (224, 224)
 
-# ===== THAM SỐ Balanced profile =====
-BLUR_THRES = 95.0              # <95 => mờ
+# THAM SỐ Balanced profile
+BLUR_THRES = 70              # 70 => mờ
 USE_DEDUP  = True              # khử trùng lặp pHash
 REJECT_WATERMARK = True
 
@@ -22,19 +22,20 @@ REJECT_WATERMARK = True
 CORNER_FRAC = 0.15
 BRIGHT_THRESH = 230
 DARK_THRESH   = 25
-EDGE_DENSITY_CORNER = 0.12
+EDGE_DENSITY_CORNER = 0.10     # giảm 20%
 BRIGHT_DARK_RATIO   = 0.25
 
 # watermark PHỦ / TRUNG TÂM
 EDGE_DENSITY_FULL   = 0.20
-EDGE_DENSITY_CENTER = 0.14
+EDGE_DENSITY_CENTER = 0.11     # giảm 20%
+
 
 # MSER text-like
 USE_MSER = True
 MSER_DELTA = 5
 MSER_MIN_AREA = 30
 MSER_MAX_AREA = 2000
-MSER_MAX_COMPONENTS = 120
+MSER_MAX_COMPONENTS = 200
 
 def list_images(root: Path):
     exts = (".jpg", ".jpeg", ".png")
@@ -119,7 +120,7 @@ def main():
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             if not is_image_ok(p):
                 reason = "invalid_or_size"
-            elif variance_of_laplacian(gray) < BLUR_THRES:
+            elif variance_of_laplacian(gray) < BLUR_THRES: # Tính độ mờ mà nhỏ hơn ngưỡng -> loại
                 reason = "blur"
             else:
                 wm_corner = has_watermark_goc(img)
@@ -156,7 +157,7 @@ def main():
         w = csv.DictWriter(fp, fieldnames=["image_id","path","reason"])
         w.writeheader(); w.writerows(rows_reject)
 
-    print(f"✔ Giữ lại: {kept} | ✖ Loại: {dropped}")
+    print(f" Giữ lại: {kept} | Loại: {dropped}")
     print(f"Ảnh sạch: {CLEAN_DIR}")
     print(f"Manifest sạch:  {clean_csv}")
     print(f"Manifest loại:  {reject_csv}")

@@ -1,0 +1,8 @@
+{
+  "method": "lbp",
+  "clean_dir": "data\\aligned_clean",
+  "feature_shape": [
+    532,
+    10
+  ]
+}

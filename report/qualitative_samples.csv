@@ -1,0 +1,1 @@
+method,query_path,top1_path,top1_cos,top2_path,top2_cos,top3_path,top3_cos,elapsed_ms,top1_ok,any_top3_ok

@@ -107,6 +107,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     # nếu chọn facenet và có GPU:
     if args.method == "facenet" and args.device == "cuda" and not torch.cuda.is_available():
-        print("⚠️ Không thấy CUDA, chuyển sang CPU.")
+        print(" Không thấy CUDA, chuyển sang CPU.")
         args.device = "cpu"
     extract_all(method=args.method, batch_device=args.device)
