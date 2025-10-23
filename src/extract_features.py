@@ -10,7 +10,7 @@ load_dotenv()
 
 # ====== đường dẫn ======
 DATA_ROOT = Path(os.getenv("DATA_DIR", "./data"))
-CLEAN_DIR = Path(os.getenv("ALIGNED_DIR", "./data/aligned"))  # có thể sửa thành ./data/aligned_clean
+CLEAN_DIR = Path(os.getenv("ALIGNED_DIR", "./data/aligned"))  
 CLEAN_DIR = Path("./data/aligned_clean")  # dùng bộ đã làm sạch
 INDEX_DIR = DATA_ROOT / "index"
 INDEX_DIR.mkdir(parents=True, exist_ok=True)
@@ -95,9 +95,9 @@ def extract_all(method="lbp", batch_device="cpu"):
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"✔ Saved features: {npy_path}")
-    print(f"✔ Saved ids:      {ids_path}")
-    print(f"✔ Saved meta:     {meta_path}")
+    print(f" Saved features: {npy_path}")
+    print(f" Saved ids:      {ids_path}")
+    print(f" Saved meta:     {meta_path}")
 
 if __name__ == "__main__":
     import argparse, torch

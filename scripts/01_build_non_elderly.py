@@ -1,4 +1,4 @@
-# scripts/01_build_non_elderly.py
+# scripts/01_build_non_elderly_v2.py
 from pathlib import Path
 import re, random
 from collections import defaultdict, deque
@@ -7,127 +7,156 @@ from tqdm import tqdm
 import torch
 from facenet_pytorch import MTCNN
 
-RAW_DIR = Path("data/raw/utkface")
-OUT_DIR = Path("data/non_elderly")
+# ====== Cấu hình ======
+RAW_DIR   = Path("data/raw/utkface")     # nơi chứa ảnh UTKFace gốc
+ELDER_DIR = Path("data/aligned_clean")   # ảnh elderly (>=60) bạn đã có
+OUT_DIR   = Path("data/non_elderly")     # nơi sẽ ghi non-elderly (0..59)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ====== tổng số ảnh non-elderly muốn lưu (1:2 ~ 700 elderly -> 1400 non) ======
-MAX_SAVE = 1400
+# Tỉ lệ muốn đạt: elderly : non = 1 : 2
+RATIO_NON_TO_ELDERLY = 2.0
+MAX_CAP = 20000  # trần an toàn
 
-age_re = re.compile(r"^(\d+)_")
-AGES = list(range(20, 60))        # 20..59 (40 tuổi)
-random.seed(42)
+# Trọng số theo bin (để học ranh giới gần elderly tốt hơn)
+# 0-19  -> 0.8x   ; 20-39 -> 1.0x ; 40-59 -> 1.2x
+BIN_WEIGHTS = {(0,19):0.8, (20,39):1.0, (40,59):1.2}
 
+SEED = 42
+random.seed(SEED)
+
+# Detector/aligner
 mtcnn = MTCNN(
-    image_size=160,
-    margin=20,
-    post_process=False,           # đầu ra [0,1] -> màu chuẩn
-    device="cuda" if torch.cuda.is_available() else "cpu",
-    keep_all=False,
-    select_largest=True,
-    min_face_size=10
+    image_size=160, margin=20, keep_all=False, select_largest=True,
+    post_process=False, min_face_size=10,
+    device="cuda" if torch.cuda.is_available() else "cpu"
 )
 
+age_re = re.compile(r"^(\d+)_")
 def parse_age(name: str):
     m = age_re.match(name)
     return int(m.group(1)) if m else None
 
 def iter_candidates(root: Path):
     for p in root.iterdir():
-        if not p.is_file():
-            continue
-        n = p.name.lower()
-        if n.endswith(".jpg") or n.endswith(".jpg.chip.jpg"):
+        if p.is_file() and p.suffix.lower()==".jpg":
             yield p
 
-def main():
-    # Gom file theo từng tuổi
-    by_age = defaultdict(list)
-    total_files = 0
-    for p in iter_candidates(RAW_DIR):
-        total_files += 1
-        age = parse_age(p.name)
-        if age is None or age not in set(AGES):
-            continue
-        by_age[age].append(p)
+def count_elderly():
+    n=0
+    if not ELDER_DIR.exists(): return 700  # fallback
+    for p in ELDER_DIR.glob("*.jpg"):
+        a = parse_age(p.name)
+        if a is not None and a >= 60: n+=1
+    return max(n,1)
 
-    # xáo trộn trong từng tuổi để tránh lệch đầu danh sách
-    for a in AGES:
+def bin_of(age:int):
+    for (lo,hi),w in BIN_WEIGHTS.items():
+        if lo <= age <= hi: return (lo,hi)
+    return None
+
+if __name__ == "__main__":
+    # 1) Quyết định tổng số cần lưu cho non-elderly
+    n_elder = count_elderly()
+    target_total = int(min(MAX_CAP, RATIO_NON_TO_ELDERLY * n_elder))
+    print(f"Elderly count≈{n_elder} → target non-elderly = {target_total}")
+
+    # 2) Gom ảnh 0..59 theo từng tuổi + đếm theo bin
+    by_age = defaultdict(list)
+    by_bin = defaultdict(list)
+    total_scanned = 0
+    for p in iter_candidates(RAW_DIR):
+        total_scanned += 1
+        age = parse_age(p.name)
+        if age is None or age > 59: 
+            continue
+        b = bin_of(age)
+        if b is None: 
+            continue
+        by_age[age].append(p); by_bin[b].append(p)
+
+    # 3) Chuẩn bị quota theo bin-weight
+    #    - Phân bổ theo trọng số BIN_WEIGHTS
+    #    - Sau đó dàn đều quota của mỗi bin cho từng tuổi trong bin
+    weight_sum = sum(BIN_WEIGHTS.values())
+    bin_quota = {}
+    for b,w in BIN_WEIGHTS.items():
+        bin_quota[b] = int(round(target_total * (w/weight_sum)))
+
+    # Bảo đảm tổng đúng target_total
+    diff = target_total - sum(bin_quota.values())
+    # Đổ phần dư vào bin 40-59 trước, rồi 20-39, rồi 0-19
+    pref = [(40,59),(20,39),(0,19)]
+    i=0
+    while diff!=0:
+        b = pref[i%len(pref)]
+        bin_quota[b] += 1 if diff>0 else -1
+        diff += -1 if diff>0 else 1
+        i+=1
+
+    print("Bin quota:", bin_quota)
+
+    # Shuffle để tránh thiên vị
+    for a in list(by_age.keys()):
         random.shuffle(by_age[a])
 
-    # quota đều cho mỗi tuổi + chia phần dư
-    base = MAX_SAVE // len(AGES)
-    rem  = MAX_SAVE - base * len(AGES)
-    target_per_age = {a: base for a in AGES}
-    for a in AGES[:rem]:
-        target_per_age[a] += 1
-
-    saved_per_age = {a: 0 for a in AGES}
     saved_total, skipped = 0, 0
+    saved_per_age = {a:0 for a in range(0,60)}
+    idx = {a:0 for a in range(0,60)}
 
-    # Hàng đợi các tuổi còn thiếu quota
-    need_queue = deque([a for a in AGES if target_per_age[a] > 0])
-
-    # Tạo con trỏ duyệt cho từng tuổi
-    idx = {a: 0 for a in AGES}
-
-    pbar = tqdm(total=MAX_SAVE, desc="Build non-elderly (even 20..59)")
-    while need_queue and saved_total < MAX_SAVE:
-        age = need_queue.popleft()
-
-        # duyệt ảnh của tuổi này cho tới khi đạt quota hoặc hết ảnh
-        while saved_per_age[age] < target_per_age[age] and idx[age] < len(by_age[age]) and saved_total < MAX_SAVE:
-            p = by_age[age][idx[age]]
-            idx[age] += 1
-            try:
-                img = Image.open(p).convert("RGB")
-                aligned = mtcnn(img, save_path=str(OUT_DIR / p.name))
-                if aligned is None:
+    # Tạo danh sách tuổi theo từng bin (round-robin)
+    pbar = tqdm(total=target_total, desc="Build non-elderly 0..59 (weighted bins)")
+    for b, q in bin_quota.items():
+        lo,hi = b
+        ages = list(range(lo,hi+1))
+        # Loại bỏ tuổi không có ảnh
+        ages = [a for a in ages if len(by_age[a])>0]
+        if not ages: continue
+        dq = deque(ages)
+        while q>0 and dq:
+            a = dq.popleft()
+            # lấy 1 ảnh từ tuổi a nếu còn
+            while idx[a] < len(by_age[a]) and q>0:
+                p = by_age[a][idx[a]]; idx[a]+=1
+                try:
+                    img = Image.open(p).convert("RGB")
+                    aligned = mtcnn(img, save_path=str(OUT_DIR / p.name))
+                    if aligned is None:
+                        skipped += 1; continue
+                    saved_per_age[a]+=1; saved_total+=1; q-=1; pbar.update(1)
+                    break
+                except Exception:
                     skipped += 1
-                    continue
-                saved_per_age[age] += 1
-                saved_total += 1
-                pbar.update(1)
-            except Exception:
-                skipped += 1
-
-        # Nếu chưa đủ quota mà vẫn còn ảnh → đưa lại vào queue để thử tiếp vòng sau
-        if saved_per_age[age] < target_per_age[age] and idx[age] < len(by_age[age]) and saved_total < MAX_SAVE:
-            need_queue.append(age)
-
-        # Nếu tuổi này đã hết ảnh nhưng chưa đủ quota → ghi nhận shortfall
-        # (phần thiếu sẽ tự động được lấp ở cuối vòng bằng các tuổi còn dư)
-
-        # Khi tất cả tuổi trong queue đều đã cạn ảnh, vòng while sẽ thoát vì không append thêm
+                    break
+            # nếu tuổi a còn ảnh và bin q >0 thì vòng sau lại push cuối hàng
+            if idx[a] < len(by_age[a]) and q>0:
+                dq.append(a)
 
     pbar.close()
 
-    # Nếu vẫn thiếu so với MAX_SAVE (vì nhiều tuổi hết ảnh), đổ nốt từ các tuổi còn ảnh
-    if saved_total < MAX_SAVE:
+    # Nếu vẫn thiếu vì cạn ảnh → đổ bù từ phần còn lại 0..59
+    if saved_total < target_total:
         leftovers = []
-        for a in AGES:
-            leftovers.extend(by_age[a][idx[a]:])  # phần còn lại chưa dùng
+        for a in range(0,60):
+            leftovers.extend(by_age[a][idx[a]:])
         random.shuffle(leftovers)
         for p in leftovers:
-            if saved_total >= MAX_SAVE:
-                break
+            if saved_total >= target_total: break
             try:
                 img = Image.open(p).convert("RGB")
                 aligned = mtcnn(img, save_path=str(OUT_DIR / p.name))
-                if aligned is None:
-                    skipped += 1
-                    continue
-                saved_total += 1
+                if aligned is None: 
+                    skipped += 1; continue
+                saved_total+=1
             except Exception:
                 skipped += 1
 
-    # ---- thống kê ----
-    print(f"Total files scanned      : {total_files}")
-    print(f"✔ Saved total            : {saved_total}")
-    print(f"✖ Skipped (no face/error): {skipped}")
-    print("Per-age saved (sample 20..29):",
-          {a: saved_per_age[a] for a in range(20, 30)})
-    print(f"Output dir               : {OUT_DIR.resolve()}")
-
-if __name__ == "__main__":
-    main()
+    # Thống kê
+    by_decade = {}
+    for d_lo in [0,10,20,30,40,50]:
+        d_hi = d_lo+9
+        by_decade[f"{d_lo}-{d_hi}"] = sum(saved_per_age[a] for a in range(d_lo, min(d_hi,59)+1))
+    print("Saved per-decade:", by_decade)
+    print(f"Total scanned : {total_scanned}")
+    print(f"Saved total   : {saved_total} (target {target_total})")
+    print(f"Skipped       : {skipped}")
+    print(f"Output dir    : {OUT_DIR.resolve()}")

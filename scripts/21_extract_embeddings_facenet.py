@@ -2,12 +2,10 @@
 from pathlib import Path
 import sys
 
-# ---- add project root to sys.path BEFORE any `from src ...` imports ----
-PROJECT_ROOT = Path(__file__).resolve().parent.parent  # .../elderly-face-retrieval
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# now it's safe to import from src
 from src.embeddings_facenet import FaceNetEmbedder, load_image_any
 
 import csv
