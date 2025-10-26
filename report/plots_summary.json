@@ -1,0 +1,11 @@
+{
+  "files": {
+    "confusion_matrix_agegroup_png": "C:\\Users\\Acer\\elderly-face-retrieval\\report\\confusion_matrix_agegroup.png",
+    "pr_curve_elderly_png": "C:\\Users\\Acer\\elderly-face-retrieval\\report\\pr_curve_elderly.png",
+    "roc_curve_elderly_png": "C:\\Users\\Acer\\elderly-face-retrieval\\report\\roc_curve_elderly.png",
+    "agegroup_report_csv": "C:\\Users\\Acer\\elderly-face-retrieval\\report\\agegroup_classification_report.csv",
+    "agegroup_report_png": "C:\\Users\\Acer\\elderly-face-retrieval\\report\\agegroup_classification_report.png",
+    "elderly_binary_report_csv": "C:\\Users\\Acer\\elderly-face-retrieval\\report\\elderly_binary_report.csv",
+    "elderly_binary_report_png": "C:\\Users\\Acer\\elderly-face-retrieval\\report\\elderly_binary_report.png"
+  }
+}

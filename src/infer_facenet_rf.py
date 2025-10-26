@@ -2,14 +2,13 @@
 from pathlib import Path
 import sys
 
-# --- add project root to sys.path BEFORE importing src.* ---
+# --- ensure project root on sys.path BEFORE importing src.* ---
 PROJECT_ROOT = Path(__file__).resolve().parents[1]  # .../elderly-face-retrieval
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.embeddings_facenet import FaceNetEmbedder, load_image_any
 
-import cv2
 import json
 import joblib
 import numpy as np
@@ -19,7 +18,7 @@ from facenet_pytorch import MTCNN
 MODEL_DIR = PROJECT_ROOT / "models"
 
 
-def image_quality_flags(img: Image.Image):
+def image_quality_flags(img: Image.Image, blur_cut: float = 90.0):
     """
     Kiểm tra chất lượng ảnh:
       - blurry: độ sắc nét thấp (Laplacian variance)
@@ -27,11 +26,12 @@ def image_quality_flags(img: Image.Image):
     Nếu thiếu OpenCV, trả về cờ mặc định (không chặn pipeline).
     """
     try:
+        import cv2  # pip install opencv-python
         g = np.array(img.convert("L"))
         fm = cv2.Laplacian(g, cv2.CV_64F).var()  # focus measure
         mean = g.mean()
         flags = {
-            "blurry": fm < 90.0,       # ngưỡng mờ
+            "blurry": fm < float(blur_cut),   # chỉnh bằng tham số
             "too_dark": mean < 60,
             "too_bright": mean > 200,
         }
@@ -51,9 +51,20 @@ class ElderlyAgePipeline:
         reg_all_path: Path = MODEL_DIR / "age_regressor_facenet_rf_all.joblib",
         agegroup_path: Path = MODEL_DIR / "agegroup_clf_facenet_rf.joblib",
         threshold: float | None = None,
+        force_crop: bool = True,
+        blur_cut: float = 90.0,
     ):
         self.embedder = FaceNetEmbedder()
-        self.clf_elder = joblib.load(clf_path)
+        # elderly classifier
+        clf = joblib.load(clf_path)
+        calib_path = MODEL_DIR / "elderly_clf_facenet_rf_calib.joblib"
+        if calib_path.exists():
+            try:
+                clf = joblib.load(calib_path)
+            except Exception:
+                pass
+        self.clf_elder = clf
+
         self.reg_elder = joblib.load(reg_elder_path)
         self.reg_all = joblib.load(reg_all_path)
         self.agegroup_clf = joblib.load(agegroup_path)
@@ -67,12 +78,16 @@ class ElderlyAgePipeline:
                 threshold = 0.5
         self.threshold = 0.5 if threshold is None else float(threshold)
 
-        # detector để đếm số mặt / chọn mặt chính
+        # detector để đếm/chọn mặt
         self.detector = MTCNN(keep_all=True, device="cpu")
+
+        # cấu hình inference
+        self.force_crop = bool(force_crop)
+        self.blur_cut = float(blur_cut)
 
     def _crop_primary_face(self, img: Image.Image, boxes, probs) -> Image.Image:
         """
-        Nếu ảnh có nhiều mặt: crop mặt có xác suất cao nhất, pad nhẹ cho an toàn.
+        Crop mặt có xác suất cao nhất, pad nhẹ cho an toàn.
         Nếu không crop được, trả lại ảnh gốc.
         """
         try:
@@ -119,12 +134,12 @@ class ElderlyAgePipeline:
         if n_faces == 0:
             return {"ok": False, "reason": "no_face_detected"}
 
-        # nếu >1 mặt: crop về mặt chính (tăng độ ổn định embedding)
-        if boxes is not None and probs is not None and n_faces >= 1:
+        # luôn crop mặt chính nếu bật force_crop
+        if boxes is not None and probs is not None and n_faces >= 1 and self.force_crop:
             img = self._crop_primary_face(img, boxes, probs)
 
         # 1) chất lượng ảnh
-        flags, qstats = image_quality_flags(img)
+        flags, qstats = image_quality_flags(img, self.blur_cut)
 
         # 2) embedding
         vec = self.embedder.embed_pil(img).reshape(1, -1)  # (1, 512)
@@ -177,7 +192,6 @@ if __name__ == "__main__":
     def convert_np(o):
         if isinstance(o, np.ndarray):
             return o.tolist()
-        # numpy scalar types
         if hasattr(np, "bool_") and isinstance(o, np.bool_):
             return bool(o)
         if isinstance(o, (np.integer,)):

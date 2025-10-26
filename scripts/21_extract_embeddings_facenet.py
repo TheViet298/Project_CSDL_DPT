@@ -42,7 +42,7 @@ def run_one(split: str, max_rows: int | None = None):
     print(f"[{split}] saved feats shape:", X.shape)
 
 if __name__ == "__main__":
-    # max_rows=None để lấy hết; đặt 2000 nếu muốn chạy nhanh lần đầu
+    # max_rows=None lấy hết
     run_one("train", max_rows=None)
     run_one("val",   max_rows=None)
     run_one("test",  max_rows=None)
