@@ -1,4 +1,4 @@
-# app.py — Streamlit GUI (compact + confidence bar + warnings)
+# app.py — Streamlit GUI (multi-face + compact + confidence bar + warnings)
 import os, sys
 from pathlib import Path
 import streamlit as st
@@ -34,14 +34,20 @@ with st.sidebar:
     thr = st.slider("Threshold elderly (cho inference)", 0.10, 0.90, 0.50, 0.01)
     blur_cut = st.slider("Ngưỡng 'mờ' (Laplacian < …)", 10, 200, 90, 1)
     force_crop = st.checkbox("Crop mặt trước khi embed", value=True)
+    mode = st.radio(
+        "Chế độ hiển thị",
+        ["Chuẩn đề bài", "Chuyên gia"],
+        index=0,
+        help="Chuẩn đề bài: chỉ hiện tuổi khi elderly. Chuyên gia: hiện thêm gợi ý tuổi cho mọi ảnh."
+    )
     st.divider()
     st.caption(f"Working dir: `{os.getcwd()}`")
     st.caption(f"Python: `{sys.version.split()[0]}`")
 
 @st.cache_resource(show_spinner=False)
-def load_pipe(threshold: float, blur_cut: float, force_crop: bool):
+def load_pipe():
     from src.infer_facenet_rf import ElderlyAgePipeline, MODEL_DIR
-    pipe = ElderlyAgePipeline(threshold=threshold, blur_cut=blur_cut, force_crop=force_crop)
+    pipe = ElderlyAgePipeline()  # cache mô hình 1 lần
     thr_file = (MODEL_DIR / "elderly_threshold.txt")
     thr_auto = None
     if thr_file.exists():
@@ -49,7 +55,7 @@ def load_pipe(threshold: float, blur_cut: float, force_crop: bool):
         except: pass
     return pipe, thr_auto
 
-pipe, thr_auto = load_pipe(thr, blur_cut, force_crop)
+pipe, thr_auto = load_pipe()
 
 with st.sidebar:
     if thr_auto is not None:
@@ -71,11 +77,37 @@ img.save(tmp_path)
 
 # ========== INFERENCE ==========
 with st.spinner("Đang phân tích..."):
-    out = pipe.predict_image(str(tmp_path))
+    # truyền tham số từ sidebar, không reload model
+    out = pipe.predict_image(str(tmp_path),
+                             threshold=thr,
+                             blur_cut=blur_cut,
+                             force_crop=force_crop)
 
 if not out.get("ok", False):
     st.error(f"❌ Không phát hiện khuôn mặt. Lý do: {out.get('reason','unknown')}")
     st.stop()
+
+# ========== CHỌN KHUÔN MẶT (nếu có nhiều mặt) ==========
+selected_idx = out.get("primary_idx", 0)
+faces = out.get("faces", [])
+
+if out.get("faces_detected", 1) > 1 and faces:
+    st.info(f"Phát hiện **{out['faces_detected']}** khuôn mặt. "
+            f"Mặc định chọn mặt **{selected_idx}** theo chiến lược **{out.get('select_strategy')}**.")
+    cols = st.columns(min(5, out["faces_detected"]))
+    for i, face in enumerate(faces):
+        bx = face["box"]
+        thumb = img.crop((bx[0], bx[1], bx[2], bx[3])).resize((120, 120))
+        with cols[i % len(cols)]:
+            st.image(thumb, caption=f"Face {i}", use_container_width=True)
+            if st.button(f"Chọn {i}", key=f"pick_{i}"):
+                selected_idx = i
+
+    # đồng bộ lại top-level cho UI dưới
+    pf = faces[selected_idx]
+    for k in ["quality_flags","quality_stats","prob_old","is_old","age_group","pred_age_official","pred_age_all_hint"]:
+        out[k] = pf[k]
+    out["primary_idx"] = selected_idx
 
 # ========== TABS ==========
 tab1, tab2, tab3 = st.tabs(["✅ Kết quả", "🔎 Chi tiết", "🧪 JSON"])
@@ -94,12 +126,19 @@ with tab1:
 
     with c2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        pred_official = out["pred_age_official"]
-        pred_hint = out["pred_age_all_hint"]
+        pred_official = out["pred_age_official"]          # tuổi khi elderly
+        pred_hint = int(round(out["pred_age_all_hint"]))  # gợi ý từ reg_all
+
         st.caption("Tuổi (elderly)")
-        st.markdown(f"<div class='big-score'>{int(round(pred_official))}</div>" if pred_official else "<div class='muted'>—</div>", unsafe_allow_html=True)
-        st.caption("Gợi ý tuổi (mọi ảnh)")
-        st.markdown(f"**{int(round(pred_hint))}**")
+        if out["is_old"] and pred_official is not None:
+            st.markdown(f"<div class='big-score'>{int(round(pred_official))}</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='muted'>—</div>", unsafe_allow_html=True)
+
+        if mode == "Chuyên gia":
+            st.caption("Gợi ý tuổi (mọi ảnh)")
+            st.markdown(f"**{pred_hint}**")
+
         st.caption("Số khuôn mặt")
         st.markdown(f"**{out.get('faces_detected',1)}**")
         st.markdown("</div>", unsafe_allow_html=True)

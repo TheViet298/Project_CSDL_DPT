@@ -12,6 +12,7 @@ from src.embeddings_facenet import FaceNetEmbedder, load_image_any
 import json
 import joblib
 import numpy as np
+import cv2
 from PIL import Image
 from facenet_pytorch import MTCNN
 
@@ -26,7 +27,6 @@ def image_quality_flags(img: Image.Image, blur_cut: float = 90.0):
     Nếu thiếu OpenCV, trả về cờ mặc định (không chặn pipeline).
     """
     try:
-        import cv2  # pip install opencv-python
         g = np.array(img.convert("L"))
         fm = cv2.Laplacian(g, cv2.CV_64F).var()  # focus measure
         mean = g.mean()
@@ -55,7 +55,8 @@ class ElderlyAgePipeline:
         blur_cut: float = 90.0,
     ):
         self.embedder = FaceNetEmbedder()
-        # elderly classifier
+
+        # elderly classifier (ưu tiên bản calibrated nếu có)
         clf = joblib.load(clf_path)
         calib_path = MODEL_DIR / "elderly_clf_facenet_rf_calib.joblib"
         if calib_path.exists():
@@ -81,101 +82,125 @@ class ElderlyAgePipeline:
         # detector để đếm/chọn mặt
         self.detector = MTCNN(keep_all=True, device="cpu")
 
-        # cấu hình inference
+        # cấu hình inference mặc định
         self.force_crop = bool(force_crop)
         self.blur_cut = float(blur_cut)
 
-    def _crop_primary_face(self, img: Image.Image, boxes, probs) -> Image.Image:
+    # --------- helpers ----------
+    def _clip_box(self, box, w, h, pad=0):
+        x1, y1, x2, y2 = [int(round(v)) for v in box]
+        x1 = max(0, x1 - pad); y1 = max(0, y1 - pad)
+        x2 = min(w, x2 + pad); y2 = min(h, y2 + pad)
+        if x2 <= x1: x2 = min(w, x1 + 1)
+        if y2 <= y1: y2 = min(h, y1 + 1)
+        return (x1, y1, x2, y2)
+
+    # --------- main predict ----------
+    def predict_image(self,
+                      img_path: str,
+                      threshold: float | None = None,
+                      blur_cut: float | None = None,
+                      force_crop: bool | None = None):
         """
-        Crop mặt có xác suất cao nhất, pad nhẹ cho an toàn.
-        Nếu không crop được, trả lại ảnh gốc.
+        Trả về:
+          {
+            ok, faces_detected, primary_idx, select_strategy, faces: [...],
+            # các trường top-level tương thích UI: quality_flags, prob_old, ...
+          }
         """
+        # backup & override tạm thời
+        _thr, _blur, _crop = self.threshold, self.blur_cut, self.force_crop
+        if threshold is not None: self.threshold = float(threshold)
+        if blur_cut  is not None: self.blur_cut  = float(blur_cut)
+        if force_crop is not None: self.force_crop = bool(force_crop)
+
         try:
-            b = np.asarray(boxes, dtype=np.float32)
-            p = np.asarray(probs, dtype=np.float32)
-            if b.ndim != 2 or len(b) == 0:
-                return img
-            idx = int(np.nanargmax(p))
-            x1, y1, x2, y2 = b[idx]
-            # nới khung
-            w = x2 - x1
-            h = y2 - y1
-            pad = 0.12
-            x1 = max(0.0, x1 - pad * w)
-            y1 = max(0.0, y1 - pad * h)
-            x2 = x2 + pad * w
-            y2 = y2 + pad * h
-            # clamp theo kích thước ảnh
+            img = load_image_any(img_path, project_root=PROJECT_ROOT)
+
+            # 1) detect tất cả mặt
+            boxes, probs = self.detector.detect(img)
+            if boxes is None or len(boxes) == 0:
+                return {"ok": False, "reason": "no_face_detected"}
+
+            boxes = np.asarray(boxes, dtype=np.float32)
+            keep = ~np.isnan(boxes).any(axis=1)
+            boxes = boxes[keep]
+            if probs is not None:
+                probs = np.asarray(probs)[keep]
+
+            n_faces = int(len(boxes))
+            if n_faces == 0:
+                return {"ok": False, "reason": "no_face_detected"}
+
             W, H = img.size
-            x1 = max(0, int(round(x1)))
-            y1 = max(0, int(round(y1)))
-            x2 = min(W, int(round(x2)))
-            y2 = min(H, int(round(y2)))
-            if x2 > x1 and y2 > y1:
-                return img.crop((x1, y1, x2, y2))
-            return img
-        except Exception:
-            return img
+            faces_out = []
+            areas = []
 
-    def predict_image(self, img_path: str):
-        img = load_image_any(img_path, project_root=PROJECT_ROOT)
+            # 2) tính kết quả cho từng mặt (crop nhẹ 10px)
+            for i, b in enumerate(boxes):
+                crop_box = self._clip_box(b, W, H, pad=10)
+                face_img = img.crop(crop_box) if self.force_crop else img
 
-        # 0) kiểm tra số mặt (robust)
-        boxes, probs = self.detector.detect(img)
-        if boxes is None:
-            n_faces = 0
-        else:
-            try:
-                arr = np.asarray(boxes, dtype=np.float32)
-                n_faces = int((~np.isnan(arr).any(axis=1)).sum())
-            except Exception:
-                n_faces = len(boxes) if hasattr(boxes, "__len__") else 1
+                flags, qstats = image_quality_flags(face_img, self.blur_cut)
+                vec = self.embedder.embed_pil(face_img).reshape(1, -1)
 
-        if n_faces == 0:
-            return {"ok": False, "reason": "no_face_detected"}
+                p_old = float(self.clf_elder.predict_proba(vec)[:, 1][0])
+                is_old = bool(p_old >= self.threshold)
 
-        # luôn crop mặt chính nếu bật force_crop
-        if boxes is not None and probs is not None and n_faces >= 1 and self.force_crop:
-            img = self._crop_primary_face(img, boxes, probs)
+                group_idx = int(self.agegroup_clf.predict(vec)[0])
+                group_map = {0: "young(0-29)", 1: "middle(30-59)", 2: "elderly(60+)"}
+                group_label = "elderly(60+)" if is_old else group_map.get(group_idx, "unknown")
 
-        # 1) chất lượng ảnh
-        flags, qstats = image_quality_flags(img, self.blur_cut)
+                age_all = float(self.reg_all.predict(vec)[0])
+                age_elder = float(self.reg_elder.predict(vec)[0]) if is_old else None
 
-        # 2) embedding
-        vec = self.embedder.embed_pil(img).reshape(1, -1)  # (1, 512)
+                x1, y1, x2, y2 = crop_box
+                area = max(1, (x2 - x1) * (y2 - y1))
+                areas.append(area)
 
-        # 3) elderly decision
-        p_old = float(self.clf_elder.predict_proba(vec)[:, 1][0])
-        is_old = bool(p_old >= self.threshold)
+                faces_out.append({
+                    "index": int(i),
+                    "box": [int(x) for x in crop_box],
+                    "det_prob": None if probs is None else float(probs[i]),
+                    "quality_flags": {
+                        "blurry": bool(flags["blurry"]),
+                        "too_dark": bool(flags["too_dark"]),
+                        "too_bright": bool(flags["too_bright"]),
+                    },
+                    "quality_stats": qstats,
+                    "prob_old": p_old,
+                    "is_old": is_old,
+                    "age_group": group_label,
+                    "pred_age_official": None if age_elder is None else float(age_elder),
+                    "pred_age_all_hint": float(age_all),
+                })
 
-        # 4) age group (0:young 0-29, 1:middle 30-59, 2:elderly 60+)
-        group_idx = int(self.agegroup_clf.predict(vec)[0])
-        group_map = {0: "young(0-29)", 1: "middle(30-59)", 2: "elderly(60+)"}
-        group_label = group_map.get(group_idx, "unknown")
-        # Ép hiển thị nhất quán với quyết định elderly
-        if is_old:
-            group_label = "elderly(60+)"
+            # 3) chọn primary: mặt lớn nhất
+            primary_idx = int(np.argmax(np.asarray(areas)))
+            strategy = "largest_area"
 
-        # 5) age estimates
-        age_all = float(self.reg_all.predict(vec)[0])          # gợi ý cho mọi ảnh
-        age_elder = float(self.reg_elder.predict(vec)[0]) if is_old else None  # tuổi chính thức khi elderly
+            # 4) back-compat: copy primary lên top-level
+            pf = faces_out[primary_idx]
+            out = {
+                "ok": True,
+                "faces_detected": n_faces,
+                "primary_idx": primary_idx,
+                "select_strategy": strategy,
+                "faces": faces_out,
 
-        # 6) xuất kết quả
-        return {
-            "ok": True,
-            "faces_detected": int(n_faces),
-            "quality_flags": {
-                "blurry": bool(flags["blurry"]),
-                "too_dark": bool(flags["too_dark"]),
-                "too_bright": bool(flags["too_bright"]),
-            },
-            "quality_stats": qstats,
-            "prob_old": float(p_old),
-            "is_old": bool(is_old),
-            "age_group": group_label,
-            "pred_age_official": None if age_elder is None else float(age_elder),
-            "pred_age_all_hint": float(age_all),
-        }
+                "quality_flags": pf["quality_flags"],
+                "quality_stats": pf["quality_stats"],
+                "prob_old": pf["prob_old"],
+                "is_old": pf["is_old"],
+                "age_group": pf["age_group"],
+                "pred_age_official": pf["pred_age_official"],
+                "pred_age_all_hint": pf["pred_age_all_hint"],
+            }
+            return out
+
+        finally:
+            # restore tham số gốc
+            self.threshold, self.blur_cut, self.force_crop = _thr, _blur, _crop
 
 
 if __name__ == "__main__":
